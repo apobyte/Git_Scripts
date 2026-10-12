@@ -1,69 +1,123 @@
 // ==UserScript==
-// @name         GitHub Follow/Unfollow All Users on Page
+// @name         github follow all users on page (auto next)
 // @namespace    http://tampermonkey.net/
-// @version      0.3
+// @version      0.2
 // @license      MIT License
-// @description  Allows you to follow or unfollow all users listed on a GitHub user page with a single click (with live counter). 🐒⚡️
-// @author       isyuricunha
+// @description  follows all users on the current page, clicks Next, and repeats until the last page
+// @author       Leonid Fedotov
 // @match        https://github.com/*
 // @icon         https://www.google.com/s2/favicons?domain=github.com
 // ==/UserScript==
 
 (function () {
-  "use strict";
+    'use strict';
 
-  // Generic function for mass follow/unfollow
-  function massAction(buttonText, valueSelector, actionName) {
-    const actionButtons = document.querySelectorAll(`input[value="${valueSelector}"]`);
-    if (actionButtons.length === 0) {
-      alert(`No "${valueSelector}" buttons found on the page.`);
-      return;
+    const FLAG = 'gh-follow-all-running';
+    const FOLLOW_DELAY = () => 1500 + Math.random() * 1500; // 1.5-3s between follows
+    const NEXT_DELAY = 3000;                                // wait before clicking Next
+
+    // Only run on pages that list users (followers / following / stars etc.)
+    const listContainer = () => document.querySelector('turbo-frame#user-profile-frame') || document;
+    if (document.querySelectorAll('.user-following-container').length === 0) {
+        sessionStorage.removeItem(FLAG);
+        return;
     }
 
-    let count = 0;
-    const actionBtn = document.getElementById(`mass-${actionName}`);
-    actionBtn.disabled = true;
-    actionBtn.innerText = `${buttonText} (0/${actionButtons.length})`;
+    const bio = document.querySelector('.js-profile-editable-area .js-user-profile-bio');
+    if (!bio) return;
 
-    const interval = setInterval(() => {
-      const btn = document.querySelector(`input[value="${valueSelector}"]`);
-      if (btn) {
-        btn.click();
-        btn.remove();
-        count++;
-        actionBtn.innerText = `${buttonText} (${count}/${actionButtons.length})`;
-      } else {
-        clearInterval(interval);
-        console.log(`${actionName} finished.`);
-        actionBtn.innerText = `✔ ${buttonText} (${count})`;
-        setTimeout(() => location.reload(), 1500);
-      }
-    }, 1500);
-  }
-
-  // Injects the action buttons into the profile UI
-  function injectButtons() {
-    const container = document.querySelector(".js-profile-editable-area .js-user-profile-bio");
-    if (!container) return;
-
-    container.insertAdjacentHTML(
-      "afterEnd",
-      `<div class="mb-3" id="mass-actions">
-         <button type="button" class="btn btn-sm btn-block btn-primary mb-2" id="mass-follow">Follow All</button>
-         <button type="button" class="btn btn-sm btn-block btn-danger" id="mass-unfollow">Unfollow All</button>
-       </div>`
+    bio.insertAdjacentHTML(
+        'afterend',
+        '<div class="mb-3"><button type="button" class="btn btn-block" id="follow-all">Follow all + auto next</button></div>'
     );
+    const button = document.getElementById('follow-all');
 
-    document.getElementById("mass-follow").onclick = () =>
-      massAction("Following", "Follow", "follow");
+    function setRunning(running) {
+        if (running) {
+            sessionStorage.setItem(FLAG, '1');
+            button.innerText = 'Running... (click to stop)';
+        } else {
+            sessionStorage.removeItem(FLAG);
+            button.innerText = 'Follow all + auto next';
+        }
+    }
 
-    document.getElementById("mass-unfollow").onclick = () =>
-      massAction("Unfollowing", "Unfollow", "unfollow");
+    const isRunning = () => sessionStorage.getItem(FLAG) === '1';
 
-    console.log("Follow/Unfollow buttons added.");
-  }
+    // Visible "Follow" buttons inside the user list only (skips the sidebar/profile button)
+    function nextFollowButton() {
+        return listContainer().querySelector(
+            '.js-form-toggle-target:not([hidden]) input[type="submit"][value="Follow"]'
+        );
+    }
 
-  // Only runs if Follow or Unfollow buttons are present
-  const hasFollowOrUnfollow = document.querySelector('input[value="Follow"], input[value="Unfollow"]');
-  if (hasFollowOrUnfollow) injectButtons();
+    function nextPageLink() {
+        return [...document.querySelectorAll('.paginate-container .pagination a')]
+            .find(a => a.textContent.trim() === 'Next' || a.getAttribute('rel') === 'next');
+    }
+
+    function followLoop() {
+        if (!isRunning()) return;
+
+        const btn = nextFollowButton();
+        if (btn) {
+            console.log('Following:', btn.title);
+            btn.click();
+            btn.remove();
+            setTimeout(followLoop, FOLLOW_DELAY());
+            return;
+        }
+
+        // Nothing left to follow on this page -> go to next page
+        const next = nextPageLink();
+        if (next) {
+            console.log('Page done, going to next page...');
+            setTimeout(() => {
+                if (!isRunning()) return;
+                const firstUser = () => {
+                    const a = listContainer().querySelector('.user-following-container')
+                        ?.closest('.d-table')?.querySelector('a[data-hovercard-type="user"]');
+                    return a ? a.getAttribute('href') : null;
+                };
+                const before = firstUser();
+                next.click();
+
+                // GitHub swaps the list in place (Turbo), so the script is not
+                // re-run. Wait until the list content changes, then continue.
+                let waited = 0;
+                const poll = setInterval(() => {
+                    waited += 500;
+                    if (!isRunning()) return clearInterval(poll);
+                    const now = firstUser();
+                    if (now && now !== before) {
+                        clearInterval(poll);
+                        setTimeout(followLoop, 1500);
+                    } else if (waited >= 20000) {
+                        clearInterval(poll);
+                        console.log('Next page did not load in time. Stopped.');
+                        setRunning(false);
+                    }
+                }, 500);
+            }, NEXT_DELAY);
+        } else {
+            console.log('Last page reached. Finished.');
+            setRunning(false);
+        }
+    }
+
+    button.onclick = () => {
+        if (isRunning()) {
+            setRunning(false);
+            console.log('Stopped.');
+        } else {
+            setRunning(true);
+            followLoop();
+        }
+    };
+
+    // Resume automatically after the page changes
+    if (isRunning()) {
+        button.innerText = 'Running... (click to stop)';
+        setTimeout(followLoop, 2000);
+    }
 })();
